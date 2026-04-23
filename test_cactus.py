@@ -1,7 +1,7 @@
 import util
 
-SIZE = 4
-PASS_LIMIT = 32
+SIZE = 8
+PASS_LIMIT = 256
 
 
 def soil_if_needed():
