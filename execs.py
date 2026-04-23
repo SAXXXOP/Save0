@@ -380,6 +380,261 @@ def dino_tile(x, y):
 	plant(Entities.Dinosaur)
 
 
+# =========================
+# maze
+# 最初は全面 maze 専用。
+# zone の x,y,w,h は使わず、原点起点の full-field で回す。
+# =========================
+
+def maze_go_to(tx, ty):
+	x = get_pos_x()
+	y = get_pos_y()
+
+	while x < tx:
+		move(East)
+		x = x + 1
+
+	while x > tx:
+		move(West)
+		x = x - 1
+
+	while y < ty:
+		move(North)
+		y = y + 1
+
+	while y > ty:
+		move(South)
+		y = y - 1
+
+
+def maze_substance_needed():
+	maze_level = num_unlocked(Unlocks.Mazes)
+	if maze_level <= 0:
+		return 0
+	return get_world_size() * 2 ** (maze_level - 1)
+
+
+def ensure_bush_at_origin():
+	maze_go_to(0, 0)
+
+	t = get_entity_type()
+	if t != None and t != Entities.Bush:
+		harvest()
+
+	if get_entity_type() != Entities.Bush:
+		plant(Entities.Bush)
+
+
+def grow_maze_once():
+	maze_go_to(0, 0)
+
+	need = maze_substance_needed()
+	if need <= 0:
+		return False
+
+	if num_items(Items.Weird_Substance) < need:
+		return False
+
+	ensure_bush_at_origin()
+	return use_item(Items.Weird_Substance, need)
+
+
+def read_treasure_pos():
+	pos = measure()
+	if pos == None:
+		return None
+	return pos
+
+
+def maze_pos_key(x, y):
+	return str(x) + "," + str(y)
+
+
+def maze_abs(v):
+	if v < 0:
+		return -v
+	return v
+
+
+def maze_next_pos(x, y, d):
+	if d == North:
+		return [x, y + 1]
+	if d == South:
+		return [x, y - 1]
+	if d == East:
+		return [x + 1, y]
+	return [x - 1, y]
+
+
+def maze_dir_between(x1, y1, x2, y2):
+	if x2 == x1 and y2 == y1 + 1:
+		return North
+	if x2 == x1 and y2 == y1 - 1:
+		return South
+	if x2 == x1 + 1 and y2 == y1:
+		return East
+	if x2 == x1 - 1 and y2 == y1:
+		return West
+	return None
+
+
+def maze_dir_priority(tx, ty):
+	x = get_pos_x()
+	y = get_pos_y()
+
+	dx = tx - x
+	dy = ty - y
+
+	order = []
+
+	if maze_abs(dx) >= maze_abs(dy):
+		if dx > 0:
+			order.append(East)
+		elif dx < 0:
+			order.append(West)
+
+		if dy > 0:
+			order.append(North)
+		elif dy < 0:
+			order.append(South)
+	else:
+		if dy > 0:
+			order.append(North)
+		elif dy < 0:
+			order.append(South)
+
+		if dx > 0:
+			order.append(East)
+		elif dx < 0:
+			order.append(West)
+
+	base = [North, East, South, West]
+
+	i = 0
+	while i < len(base):
+		d = base[i]
+
+		found = False
+		j = 0
+		while j < len(order):
+			if order[j] == d:
+				found = True
+				break
+			j = j + 1
+
+		if not found:
+			order.append(d)
+
+		i = i + 1
+
+	return order
+
+
+def choose_next_maze_dir(tx, ty, visited):
+	x = get_pos_x()
+	y = get_pos_y()
+
+	order = maze_dir_priority(tx, ty)
+
+	best_dir = None
+	best_score = 999999
+
+	i = 0
+	while i < len(order):
+		d = order[i]
+
+		if can_move(d):
+			p = maze_next_pos(x, y, d)
+			nx = p[0]
+			ny = p[1]
+			k = maze_pos_key(nx, ny)
+
+			if not (k in visited):
+				score = maze_abs(tx - nx) + maze_abs(ty - ny)
+
+				if score < best_score:
+					best_score = score
+					best_dir = d
+
+		i = i + 1
+
+	return best_dir
+
+
+def solve_maze_targeted_walk():
+	target = read_treasure_pos()
+	if target == None:
+		return False
+
+	tx = target[0]
+	ty = target[1]
+
+	visited = {}
+	parent = {}
+
+	x = get_pos_x()
+	y = get_pos_y()
+
+	visited[maze_pos_key(x, y)] = 1
+	parent[maze_pos_key(x, y)] = None
+
+	limit = get_world_size() * get_world_size() * 20
+	steps = 0
+
+	while steps < limit:
+		if get_entity_type() == Entities.Treasure:
+			return True
+
+		d = choose_next_maze_dir(tx, ty, visited)
+
+		if d != None:
+			cur_x = get_pos_x()
+			cur_y = get_pos_y()
+
+			p = maze_next_pos(cur_x, cur_y, d)
+			nx = p[0]
+			ny = p[1]
+
+			move(d)
+
+			parent[maze_pos_key(nx, ny)] = [cur_x, cur_y]
+			visited[maze_pos_key(nx, ny)] = 1
+			steps = steps + 1
+			continue
+
+		cur_x = get_pos_x()
+		cur_y = get_pos_y()
+		cur_key = maze_pos_key(cur_x, cur_y)
+
+		prev = parent[cur_key]
+		if prev == None:
+			break
+
+		back = maze_dir_between(cur_x, cur_y, prev[0], prev[1])
+		if back == None:
+			return False
+
+		move(back)
+		steps = steps + 1
+
+	return get_entity_type() == Entities.Treasure
+
+
+def run_maze_zone(zone):
+	# 最初は full-field 専用
+	if num_unlocked(Unlocks.Mazes) <= 0:
+		return
+
+	if not grow_maze_once():
+		return
+
+	if not solve_maze_targeted_walk():
+		return
+
+	if get_entity_type() == Entities.Treasure:
+		harvest()
+
+
 def run_zone(zone):
 	crop = zone["crop"]
 	x = zone["x"]
@@ -404,6 +659,9 @@ def run_zone(zone):
 		return
 	if crop == "dino":
 		util.run_rect(x, y, w, h, dino_tile)
+		return
+	if crop == "maze":
+		run_maze_zone(zone)
 		return
 
 	util.run_rect(x, y, w, h, hay_tile)

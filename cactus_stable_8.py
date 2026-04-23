@@ -3,7 +3,7 @@ import util
 SIZE = 16
 HALF = SIZE // 2
 
-BURST_PASSES = 9
+BURST_PASSES = (SIZE * 55 + 99) // 100
 RUNS = 3
 
 stats = []
@@ -46,6 +46,26 @@ def work_end(start_info):
 def soil_if_needed():
 	if get_ground_type() != Grounds.Soil:
 		till()
+
+
+def split_start(total, parts, idx):
+	base = total // parts
+	rem = total % parts
+
+	if idx < rem:
+		return idx * (base + 1)
+
+	return rem * (base + 1) + (idx - rem) * base
+
+
+def split_size(total, parts, idx):
+	base = total // parts
+	rem = total % parts
+
+	if idx < rem:
+		return base + 1
+
+	return base
 
 
 def seed_half(x0, y0, w, h):
@@ -122,13 +142,14 @@ def ready_half(x0, y0, w, h):
 	return True
 
 
-def h_sweep_once():
-	util.go_to(0, 0)
+def h_sweep_block(row_start, row_count):
 	changed = 0
+	row_end = row_start + row_count
 
-	y = 0
-	while y < SIZE:
+	y = row_start
+	while y < row_end:
 		if y % 2 == 0:
+			util.go_to(0, y)
 			x = 0
 			while x < SIZE:
 				a = measure()
@@ -144,6 +165,7 @@ def h_sweep_once():
 					move(East)
 				x = x + 1
 		else:
+			util.go_to(SIZE - 1, y)
 			x = SIZE - 1
 			while x >= 0:
 				a = measure()
@@ -162,18 +184,17 @@ def h_sweep_once():
 					move(West)
 				x = x - 1
 
-		if y < SIZE - 1:
-			move(North)
 		y = y + 1
 
 	return changed
 
 
-def v_sweep_once():
+def v_sweep_block(col_start, col_count):
 	changed = 0
+	col_end = col_start + col_count
 
-	x = 0
-	while x < SIZE:
+	x = col_start
+	while x < col_end:
 		if x % 2 == 0:
 			util.go_to(x, 0)
 			y = 0
@@ -191,7 +212,6 @@ def v_sweep_once():
 				if y < SIZE - 1:
 					move(North)
 				y = y + 1
-
 		else:
 			util.go_to(x, SIZE - 1)
 			y = SIZE - 1
@@ -218,31 +238,55 @@ def v_sweep_once():
 	return changed
 
 
-def h_worker(passes):
+def h_worker(block_idx, total_blocks, passes):
+	row_start = split_start(SIZE, total_blocks, block_idx)
+	row_count = split_size(SIZE, total_blocks, block_idx)
+
+	if row_count <= 0:
+		return 0
+
 	total = 0
 	n = 0
 	while n < passes:
-		total = total + h_sweep_once()
+		total = total + h_sweep_block(row_start, row_count)
 		n = n + 1
 	return total
 
 
-def v_worker(passes):
+def v_worker(block_idx, total_blocks, passes):
+	col_start = split_start(SIZE, total_blocks, block_idx)
+	col_count = split_size(SIZE, total_blocks, block_idx)
+
+	if col_count <= 0:
+		return 0
+
 	total = 0
 	n = 0
 	while n < passes:
-		total = total + v_sweep_once()
+		total = total + v_sweep_block(col_start, col_count)
 		n = n + 1
 	return total
 
 
-def seed_worker(x0, y0, w, h):
-	seed_half(x0, y0, w, h)
+def seed_worker(part_idx, total_parts):
+	x0 = split_start(SIZE, total_parts, part_idx)
+	w = split_size(SIZE, total_parts, part_idx)
+
+	if w <= 0:
+		return 0
+
+	seed_half(x0, 0, w, SIZE)
 	return 1
 
 
-def ready_worker(x0, y0, w, h):
-	if ready_half(x0, y0, w, h):
+def ready_worker(part_idx, total_parts):
+	x0 = split_start(SIZE, total_parts, part_idx)
+	w = split_size(SIZE, total_parts, part_idx)
+
+	if w <= 0:
+		return 0
+
+	if ready_half(x0, 0, w, SIZE):
 		return 1
 	return 0
 
@@ -278,52 +322,130 @@ def log_rows(tag, run_no):
 def seed_parallel(run_no):
 	s = work_start()
 
-	h = spawn_drone(seed_worker, HALF, 0, SIZE - HALF, SIZE)
-	left = seed_worker(0, 0, HALF, SIZE)
+	total_workers = max_drones()
+	if total_workers < 1:
+		total_workers = 1
+	if total_workers > SIZE:
+		total_workers = SIZE
 
-	right = 0
-	if h != None:
-		right = wait_for(h)
+	handles = []
+	done = 0
+
+	part_idx = 1
+	while part_idx < total_workers:
+		h = spawn_drone(seed_worker, part_idx, total_workers)
+		if h != None:
+			handles.append(h)
+		part_idx = part_idx + 1
+
+	done = done + seed_worker(0, total_workers)
+
+	i = 0
+	while i < len(handles):
+		done = done + wait_for(handles[i])
+		i = i + 1
 
 	d = work_end(s)
-	stat_add(run_no, "seed", d[0], d[1], [left, right])
+	stat_add(run_no, "seed", d[0], d[1], [done, total_workers])
 
-	return left + right
+	return done
 
 
 def ready_parallel(run_no):
 	s = work_start()
 
-	h = spawn_drone(ready_worker, HALF, 0, SIZE - HALF, SIZE)
-	left = ready_worker(0, 0, HALF, SIZE)
+	total_workers = max_drones()
+	if total_workers < 1:
+		total_workers = 1
+	if total_workers > SIZE:
+		total_workers = SIZE
 
-	right = 0
-	if h != None:
-		right = wait_for(h)
+	handles = []
+	ok_count = 0
+
+	part_idx = 1
+	while part_idx < total_workers:
+		h = spawn_drone(ready_worker, part_idx, total_workers)
+		if h != None:
+			handles.append(h)
+		part_idx = part_idx + 1
+
+	ok_count = ok_count + ready_worker(0, total_workers)
+
+	i = 0
+	while i < len(handles):
+		ok_count = ok_count + wait_for(handles[i])
+		i = i + 1
 
 	d = work_end(s)
-	stat_add(run_no, "ready", d[0], d[1], [left, right])
+	stat_add(run_no, "ready", d[0], d[1], [ok_count, total_workers])
 
-	if left == 1 and right == 1:
-		return True
-
-	return False
+	return ok_count == total_workers
 
 
 def burst_once(run_no):
 	s = work_start()
 
-	h = spawn_drone(v_worker, BURST_PASSES)
-	hc = h_worker(BURST_PASSES)
+	use_total = max_drones()
+	if use_total > 8:
+		use_total = 8
+	if use_total < 2:
+		use_total = 2
 
-	vc = 0
-	if h != None:
-		vc = wait_for(h)
+	h_count = use_total // 2
+	v_count = use_total - h_count
+
+	if h_count < 1:
+		h_count = 1
+	if v_count < 1:
+		v_count = 1
+
+	handles = []
+	modes = []
+	blocks = []
+
+	i = 1
+	while i < h_count:
+		h = spawn_drone(h_worker, i, h_count, BURST_PASSES)
+		if h != None:
+			handles.append(h)
+			modes.append(0)
+			blocks.append(i)
+		i = i + 1
+
+	i = 0
+	while i < v_count:
+		h = spawn_drone(v_worker, i, v_count, BURST_PASSES)
+		if h != None:
+			handles.append(h)
+			modes.append(1)
+			blocks.append(i)
+		i = i + 1
+
+	total_h = h_worker(0, h_count, BURST_PASSES)
+	total_v = 0
+
+	i = 0
+	while i < len(handles):
+		r = wait_for(handles[i])
+
+		if modes[i] == 0:
+			total_h = total_h + r
+		else:
+			total_v = total_v + r
+
+		i = i + 1
 
 	d = work_end(s)
-	stat_add(run_no, "burst", d[0], d[1], [hc, vc])
+	stat_add(
+		run_no,
+		"burst",
+		d[0],
+		d[1],
+		[total_h, total_v, use_total, h_count, v_count, blocks]
+	)
 
-	if hc == 0 and vc == 0:
+	if total_h == 0 and total_v == 0:
 		return False
 
 	return True
